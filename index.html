@@ -582,12 +582,12 @@ window.addEventListener('keydown', (e) => {
         let loadPct = 0, loadFromCache = false, loadMsgText = '';
 
         function mpTuning() {
-            /* 手机摄像头噪点大、手离得远，阈值必须比桌面松，否则一直“未识别到手” */
+            /* 手机摄像头噪点大、手离得远、画面还是横的，阈值必须比桌面松得多，否则一直“未识别到手” */
             const mob = !!window.IS_MOBILE;
             return {
-                minHandDetectionConfidence: mob ? 0.3 : 0.5,
-                minHandPresenceConfidence: mob ? 0.3 : 0.5,
-                minTrackingConfidence: mob ? 0.25 : 0.5
+                minHandDetectionConfidence: mob ? 0.25 : 0.5,
+                minHandPresenceConfidence: mob ? 0.25 : 0.5,
+                minTrackingConfidence: mob ? 0.15 : 0.5
             };
         }
 
@@ -699,6 +699,11 @@ window.addEventListener('keydown', (e) => {
                 baseOptions: Object.assign({ delegate: delegate }, base),
                 runningMode: 'VIDEO', numHands: 1
             }, mpTuning());
+            /* 手机 GPU delegate 在部分安卓/微信内核里“假成功”——不报错但一帧都出不来，直接走 CPU 更稳 */
+            if (window.IS_MOBILE) {
+                try { return await mod.GestureRecognizer.createFromOptions(fileset, opts('CPU')); }
+                catch (e1) { console.warn('CPU recognizer failed, retry GPU', e1); return await mod.GestureRecognizer.createFromOptions(fileset, opts('GPU')); }
+            }
             try { return await mod.GestureRecognizer.createFromOptions(fileset, opts('GPU')); }
             catch (errGPU) { console.warn('GPU delegate failed, retry CPU', errGPU); return await mod.GestureRecognizer.createFromOptions(fileset, opts('CPU')); }
         }
@@ -872,9 +877,10 @@ window.addEventListener('keydown', (e) => {
             if (window.__gestureErr) st = '模型加载失败';
             else if (!window.__gestureReady) st = loadMsgText || '模型加载中';
             else if (!CAM_STATE || CAM_STATE !== 'live') st = '等待摄像头';
-            else if (!hasHand) st = '手 ✗ 未进画面';
-            else st = '手 ✓ ' + (KIND_LABEL[gKindNow] || '识别中');
-            el.innerText = '手势 · ' + st + (gFps ? ' · ' + gFps + 'fps' : '');
+            else if (window.IS_MOBILE && brightVal >= 0 && brightVal < 6) st = '画面全黑 · 换系统浏览器打开';
+            else if (!hasHand) st = '手 ✗ 未进画面 · 退后一点';
+            else st = '手 ✓ ' + (KIND_LABEL[gKindNow] || '识别中') + (window.IS_MOBILE && lastHandScore ? ' ' + lastHandScore : '');
+            el.innerText = '手势 · ' + st + (gFps ? ' · ' + gFps + 'fps' : '') + (window.IS_MOBILE && inferMs ? ' · ' + inferMs + 'ms' : '');
         }
         /* 调参用：控制台里可直接拿关键点试判定 */
         window.__gestureDebug = { isOkSign: (lm) => isOkSign(lm), fingersUp: (lm) => fingersUp(lm), okCircleMax: () => okCircleMax(),
@@ -911,18 +917,47 @@ window.addEventListener('keydown', (e) => {
             if (camStream) camStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
         });
         function renderWebcamPreview(){const c=document.getElementById('webcam-canvas'),x=c.getContext('2d',{willReadFrequently:true});function d(){if(videoElement.readyState>=2)x.drawImage(videoElement,0,0,c.width,c.height);requestAnimationFrame(d)}d()}
-        let lvt=-1,lastDetect=0;
+        let lvt=-1,lastDetect=0,lastTs=0,inferMs=0,lastHandScore=0;
+        /* 手机端把画面缩到 320 宽再送推理：720p 纹理上采样太贵，缩完单帧快 3-4 倍 */
+        const inferCanvas=document.createElement('canvas');
+        inferCanvas.width=320; inferCanvas.height=240;
+        const inferCtx=inferCanvas.getContext('2d',{willReadFrequently:true});
+        function grabFrame(){
+            if(!videoElement||videoElement.readyState<2) return null;
+            const vw=videoElement.videoWidth||320, vh=videoElement.videoHeight||240;
+            const w=320, h=Math.round(320*vh/vw)||240;
+            if(inferCanvas.width!==w||inferCanvas.height!==h){ inferCanvas.width=w; inferCanvas.height=h; }
+            try{ inferCtx.drawImage(videoElement,0,0,w,h); return inferCanvas; }catch(e){ return null; }
+        }
+        function frameBrightness(){
+            try{
+                const c=document.createElement('canvas'); c.width=16; c.height=12;
+                const x=c.getContext('2d',{willReadFrequently:true});
+                x.drawImage(inferCanvas,0,0,16,12);
+                const d=x.getImageData(0,0,16,12).data; let sum=0;
+                for(let i=0;i<d.length;i+=4) sum+=(d[i]+d[i+1]+d[i+2])/3;
+                return sum/(d.length/4);
+            }catch(e){ return -1; }
+        }
+        let lastBrightT=0, brightVal=-1;
         function predictWebcam(){
             const mob = !!window.IS_MOBILE;
-            if(videoElement&&gestureRecognizer&&videoElement.readyState>=2&&videoElement.currentTime!==lvt){
+            let input=videoElement;
+            if(mob){
+                input=grabFrame();
+                if(videoElement&&videoElement.paused){ try{ videoElement.play(); }catch(e){} }
+                if(input && performance.now()-lastBrightT>2000){ lastBrightT=performance.now(); brightVal=frameBrightness(); }
+            }
+            if(input&&gestureRecognizer&&videoElement&&videoElement.readyState>=2&&(mob||videoElement.currentTime!==lvt)){
                 const now=performance.now();
-                /* 手机端 55ms 一帧（约 18fps），桌面 90ms；手机推理明显跟不上时才自适应拉开间隔 */
-                let gap = mob ? 55 : 90;
-                if (mob && gFps && gFps < 10) gap = Math.min(170, Math.round(1000 / Math.max(4, gFps) + 20));
-                if(now-lastDetect>=gap){
-                    lastDetect=now;lvt=videoElement.currentTime;
-                    let res=null;
-                    try{res=gestureRecognizer.recognizeForVideo(videoElement,now);}catch(e){console.warn(e);}
+                /* 手机端目标 12-15fps，按上一帧真实耗时自适应拉开间隔，保证树不卡、识别不断 */
+                let gap = mob ? Math.max(66, Math.min(200, inferMs * 2)) : 90;
+                if(now-lastDetect>=gap && now-lastTs>=1){
+                    lastDetect=now; lastTs=now; lvt=videoElement.currentTime;
+                    let res=null; const t0=performance.now();
+                    try{res=gestureRecognizer.recognizeForVideo(input,now);}catch(e){ window.__inferErr = (e&&e.message)||String(e); console.warn(e); }
+                    inferMs = Math.round(performance.now()-t0);
+                    if(res){ lastHandScore = (res.gestures&&res.gestures.length&&res.gestures[0][0]) ? Math.round(res.gestures[0][0].score*100) : (res.landmarks&&res.landmarks.length ? 100 : 0); }
                     processGestures(res);
                     gFpsN++; if(now-gFpsT>=1000){ gFps=Math.max(1,Math.round(gFpsN*1000/(now-gFpsT))); gFpsN=0; gFpsT=now; }
                     refreshHint();
@@ -985,7 +1020,7 @@ if(manualRotateState.x!==0||manualRotateState.y!==0){const s=CONFIG.interaction.
             composer.render();
         }
         // ================= 移动端运行时 (v17.6.5-m) =================
-        const IS_MOBILE = (window.matchMedia && (window.matchMedia('(max-width: 760px)').matches || window.matchMedia('(hover: none) and (pointer: coarse)').matches)) || /Android|iPhone|iPad|iPod|HarmonyOS|Mobile/i.test(navigator.userAgent);
+        const IS_MOBILE = (window.matchMedia && (window.matchMedia('(max-width: 760px)').matches || window.matchMedia('(hover: none) and (pointer: coarse)').matches)) || /Android|iPhone|iPad|iPod|HarmonyOS|Mobile/i.test(navigator.userAgent) || /[?&]m=1/.test(location.search);
         window.IS_MOBILE = IS_MOBILE;
         if (IS_MOBILE) {
             CONFIG.particles.count = 700;
