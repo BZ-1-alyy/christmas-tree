@@ -531,6 +531,15 @@ window.addEventListener('keydown', (e) => {
                 camStream = stream;
                 videoElement = document.getElementById('webcam-video');
                 videoElement.srcObject = stream;
+                /* 手机浏览器会“优化掉”不在视口里、或者只有 2px 的 video，导致 readyState 一直上不去、画面永远 0 帧；
+                   把 video 塞进右下那个小预览框里（压在 canvas 底下、透明度 0.02），解码就稳定了 */
+                try {
+                    const wrap = document.getElementById('webcam-wrapper');
+                    if (wrap && videoElement.parentElement !== wrap) {
+                        videoElement.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;opacity:0.02;object-fit:cover;pointer-events:none;z-index:0;';
+                        wrap.insertBefore(videoElement, wrap.firstChild);
+                    }
+                } catch (e) {}
                 await videoElement.play().catch(() => {});
                 /* 等首帧就绪：videoWidth 为 0 时送进识别器会直接拿到空结果 */
                 if (!videoElement.videoWidth) {
@@ -880,7 +889,10 @@ window.addEventListener('keydown', (e) => {
             else if (window.IS_MOBILE && brightVal >= 0 && brightVal < 6) st = '画面全黑 · 换系统浏览器打开';
             else if (!hasHand) st = '手 ✗ 未进画面 · 退后一点';
             else st = '手 ✓ ' + (KIND_LABEL[gKindNow] || '识别中') + (window.IS_MOBILE && lastHandScore ? ' ' + lastHandScore : '');
-            const dbg = window.IS_MOBILE ? (' · ' + (gFps || 0) + 'fps · ' + (inferMs || 0) + 'ms · ' + INFER_MODE_NAME[inferMode] + (videoElement ? ' ' + videoElement.videoWidth + '×' + videoElement.videoHeight : '')) : (gFps ? ' · ' + gFps + 'fps' : '');
+            const dbg = window.IS_MOBILE
+                ? (' · ' + (gFps || 0) + 'fps · ' + (inferMs || 0) + 'ms · ' + (videoElement ? videoElement.videoWidth + '×' + videoElement.videoHeight + ' rs' + videoElement.readyState : 'no-video')
+                   + (drawFail ? ' 抓帧失败' : '') + ' · ' + rDets + '/' + rTicks)
+                : (gFps ? ' · ' + gFps + 'fps' : '');
             el.innerText = '手势 · ' + st + dbg;
         }
         /* 调参用：控制台里可直接拿关键点试判定 */
@@ -928,7 +940,7 @@ window.addEventListener('keydown', (e) => {
             const vw=videoElement.videoWidth||320, vh=videoElement.videoHeight||240;
             const w=320, h=Math.round(320*vh/vw)||240;
             if(inferCanvas.width!==w||inferCanvas.height!==h){ inferCanvas.width=w; inferCanvas.height=h; }
-            try{ inferCtx.drawImage(videoElement,0,0,w,h); return inferCanvas; }catch(e){ return null; }
+            try{ inferCtx.drawImage(videoElement,0,0,w,h); drawFail=0; return inferCanvas; }catch(e){ drawFail=1; window.__drawErr=(e&&e.message)||String(e); return null; }
         }
         function frameBrightness(){
             try{
@@ -940,7 +952,7 @@ window.addEventListener('keydown', (e) => {
                 return sum/(d.length/4);
             }catch(e){ return -1; }
         }
-        let lastBrightT=0, brightVal=-1, inferMode=0, lastHandAt=0, modeSwitchT=0;
+        let lastBrightT=0, brightVal=-1, inferMode=0, lastHandAt=0, modeSwitchT=0, rTicks=0, rDets=0, drawFail=0;
         const INFER_MODE_NAME = ['缩略图320', '原画', '缩略图480'];
         function inferInput(){
             if(inferMode===1) return videoElement;
@@ -948,7 +960,7 @@ window.addEventListener('keydown', (e) => {
             const w = inferMode===2 ? 480 : 320;
             const h = Math.round(w*vh/vw)||Math.round(w*0.75);
             if(inferCanvas.width!==w||inferCanvas.height!==h){ inferCanvas.width=w; inferCanvas.height=h; }
-            try{ inferCtx.drawImage(videoElement,0,0,w,h); return inferCanvas; }catch(e){ return null; }
+            try{ inferCtx.drawImage(videoElement,0,0,w,h); drawFail=0; return inferCanvas; }catch(e){ drawFail=1; window.__drawErr=(e&&e.message)||String(e); return null; }
         }
         function predictWebcam(){
             const mob = !!window.IS_MOBILE;
@@ -956,21 +968,21 @@ window.addEventListener('keydown', (e) => {
             /* 视频被系统暂停就继续播：iOS/安卓切后台再回来最常见的“画面在但推理不动” */
             if(videoElement&&videoElement.paused){ try{ videoElement.play(); }catch(e){} }
             let input=null;
+            rTicks++;
             if(videoElement&&videoElement.readyState>=2&&gestureRecognizer){
-                input = mob ? inferInput() : videoElement;
-                /* 12 秒一个人都抓不到就自动换输入方式：缩略图 → 原画 → 更大缩略图，逐档自愈 */
+                input = mob ? (inferInput()||videoElement) : videoElement;
                 if(mob && now-lastHandAt>12000 && now-modeSwitchT>3000){
                     modeSwitchT=now; lastHandAt=now;
                     inferMode=(inferMode+1)%3;
                     camMsg('识别不顺 · 自动切换成' + INFER_MODE_NAME[inferMode]);
                 }
-                if(input && performance.now()-lastBrightT>2000){ lastBrightT=now; brightVal=frameBrightness(); }
+                if(input && performance.now()-lastBrightT>2000 && inferMode!==1){ lastBrightT=now; brightVal=frameBrightness(); }
             }
             if(input&&(mob||videoElement.currentTime!==lvt)){
                 /* 手机端目标 12-15fps，按上一帧真实耗时自适应拉开间隔，保证树不卡、识别不断 */
                 let gap = mob ? Math.max(66, Math.min(220, inferMs * 2)) : 90;
                 if(now-lastDetect>=gap && now-lastTs>=1){
-                    lastDetect=now; lastTs=now; lvt=videoElement.currentTime;
+                    lastDetect=now; lastTs=now; lvt=videoElement.currentTime; rDets++;
                     let res=null; const t0=performance.now();
                     try{res=gestureRecognizer.recognizeForVideo(input,now);}catch(e){ window.__inferErr = (e&&e.message)||String(e); console.warn(e); }
                     inferMs = Math.round(performance.now()-t0);
