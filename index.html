@@ -625,7 +625,7 @@ window.addEventListener('keydown', (e) => {
         const OPEN_GESTURES = { Open_Palm: 1, Victory: 1, Pointing_Up: 1, ILoveYou: 1, Thumb_Up: 1 };
         let mpPromise = null, gPending = null, gPendingN = 0, gLastKind = null, gSeenT = 0, gOkCool = 0, wagLastY = null, wagDir = 0, wagCool = 0;
         let gKindNow = null, gFps = 0, gFpsN = 0, gFpsT = 0, gLastResT = 0;
-        let loadPct = 0, loadFromCache = false, loadMsgText = '';
+        let loadPct = 0, loadFromCache = false, loadMsgText = '', loadStage = '', loadT0 = 0;
 
         function mpTuning() {
             /* 手机摄像头噪点大、手离得远、画面还是横的，阈值必须比桌面松得多，否则一直“未识别到手” */
@@ -682,10 +682,16 @@ window.addEventListener('keydown', (e) => {
                 loadFromCache = true; loadPct = 1; setLoadMsg('模型本地缓存命中');
                 return new Uint8Array(cached);
             }
-            for (let u = 0; u < MODEL_URLS.length; u++) {
-                const url = MODEL_URLS[u];
+            const urls = window.IS_MOBILE
+                ? [MODEL_URLS[1], MODEL_URLS[0], MODEL_URLS[2]]
+                : MODEL_URLS;
+            const list = Array.from(new Set(urls));
+            for (let u = 0; u < list.length; u++) {
+                const url = list[u];
+                const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
                 try {
-                    const r = await fetch(url, { cache: 'force-cache' });
+                    loadStage = '模型 ' + (u + 1) + '/' + list.length;
+                    const r = await fetch(url, ctrl ? { cache: 'force-cache', signal: ctrl.signal } : { cache: 'force-cache' });
                     if (!r.ok) throw new Error('HTTP ' + r.status);
                     const total = 8373440;   /* 模型解压后固定 8.37MB，Content-Length 是压缩后的值，不能拿来算百分比 */
                     let buf;
@@ -693,13 +699,19 @@ window.addEventListener('keydown', (e) => {
                         const reader = r.body.getReader();
                         const parts = [];
                         let got = 0;
-                        while (true) {
-                            const { done, value } = await reader.read();
-                            if (done) break;
-                            parts.push(value); got += value.byteLength;
-                            loadPct = Math.min(0.99, got / total);
-                            setLoadMsg('下载模型 ' + (got / 1048576).toFixed(1) + '/8.0MB · ' + Math.round(loadPct * 100) + '%');
-                        }
+                        let lastByte = performance.now();
+                        /* 10 秒一个字节都没收到就判这路断了，换下一路，不要干等 */
+                        const guard = setInterval(() => { if (ctrl && performance.now() - lastByte > 10000) { try { ctrl.abort(); } catch (e) {} } }, 1000);
+                        try {
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) break;
+                                lastByte = performance.now();
+                                parts.push(value); got += value.byteLength;
+                                loadPct = Math.min(0.99, got / total);
+                                setLoadMsg('下载模型 ' + (got / 1048576).toFixed(1) + '/8.0MB · ' + Math.round(loadPct * 100) + '%');
+                            }
+                        } finally { clearInterval(guard); }
                         buf = new Uint8Array(got);
                         let off = 0;
                         for (const p of parts) { buf.set(p, off); off += p.byteLength; }
@@ -717,18 +729,23 @@ window.addEventListener('keydown', (e) => {
         }
 
         let rtCache = null;
-        /* 运行时（vision_bundle.mjs + wasm）优先走 jsDelivr，失败再退回本地目录 */
+        function withTimeout(p, ms, label) {
+            return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('超时:' + label)), ms))]);
+        }
+        /* 运行时（vision_bundle.mjs + wasm）：手机优先同源（GitHub Pages 直连最稳，jsDelivr 国内经常性挂住），
+           桌面优先 jsDelivr；每一档都带超时，卡住会自己跳到下一档 */
         async function getRuntime() {
             if (rtCache) return rtCache;
-            const bases = [
-                { imp: MP_BASE + '/vision_bundle.mjs', wasm: MP_BASE + '/wasm', tag: 'cdn' },
-                { imp: MP_LOCAL + '/vision_bundle.mjs', wasm: MP_LOCAL, tag: 'local:mp' },
-                { imp: './vision_bundle.mjs', wasm: '.', tag: 'local:root' }
-            ];
-            for (const b of bases) {
+            const cdn = { imp: MP_BASE + '/vision_bundle.mjs', wasm: MP_BASE + '/wasm', tag: 'cdn' };
+            const root = { imp: './vision_bundle.mjs', wasm: '.', tag: 'local:root' };
+            const mp = { imp: MP_LOCAL + '/vision_bundle.mjs', wasm: MP_LOCAL, tag: 'local:mp' };
+            const bases = window.IS_MOBILE ? [root, mp, cdn] : [cdn, mp, root];
+            for (let i = 0; i < bases.length; i++) {
+                const b = bases[i];
+                loadStage = '运行时 ' + (i + 1) + '/' + bases.length;
                 try {
-                    const mod = await import(b.imp);
-                    const fileset = await mod.FilesetResolver.forVisionTasks(b.wasm);
+                    const mod = await withTimeout(import(b.imp), 45000, 'import');
+                    const fileset = await withTimeout(mod.FilesetResolver.forVisionTasks(b.wasm), 90000, 'wasm');
                     rtCache = { mod: mod, fileset: fileset, base: b.wasm };
                     window.__mpSource = b.tag;
                     return rtCache;
@@ -757,6 +774,7 @@ window.addEventListener('keydown', (e) => {
         function loadRecognizer() {
             if (mpPromise) return mpPromise;
             mpPromise = (async () => {
+                loadT0 = performance.now();
                 if (!window.__gestureReady) setLoadMsg('加载手势引擎…');
                 /* 模型与运行时并行，谁慢等谁 */
                 const modelP = getModelBuffer().catch(() => null);
@@ -1109,7 +1127,15 @@ window.addEventListener('keydown', (e) => {
         }
         /* 看门狗：不管识别有没有跑起来，每秒都刷新一次状态行，避免停在“就绪”两个字上瞎猜 */
         setInterval(() => {
-            if (!window.__gestureReady) return;
+            if (!window.__gestureReady) {
+                const el = document.getElementById('hand-hud');
+                if (el) {
+                    const secs = Math.round((performance.now() - loadT0) / 1000);
+                    el.innerText = '手势 · 加载中 ' + secs + 's · ' + (loadStage || '准备中')
+                        + (loadPct > 0 ? ' · ' + Math.round(loadPct * 100) + '%' : '');
+                }
+                return;
+            }
             updateHandHud(STATE.hand.detected);
         }, 900);
 
