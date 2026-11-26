@@ -630,9 +630,9 @@ window.addEventListener('keydown', (e) => {
             'gesture_recognizer.task.gz'
         ];
         const MODEL_URLS_CN = [
-            MP_MODEL_LOCAL,
             'https://fastly.jsdelivr.net/gh/BZ-1-alyy/christmas-tree@main/gesture_recognizer.task',
             'https://cdn.jsdelivr.net/gh/BZ-1-alyy/christmas-tree@main/gesture_recognizer.task',
+            MP_MODEL_LOCAL,
             'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task'
         ];
         const OPEN_GESTURES = { Open_Palm: 1, Victory: 1, Pointing_Up: 1, ILoveYou: 1, Thumb_Up: 1 };
@@ -688,7 +688,41 @@ window.addEventListener('keydown', (e) => {
             if (h) h.innerText = '手势 · ' + text;
         }
 
-        /* 带进度地取模型；先查本地缓存，再按 MODEL_URLS 顺序下载，成功后写回缓存 */
+        /* 多连接分段下载：单个连接被限速时，4 路 Range 并发通常能把模型下载提速 2-4 倍 */
+        async function fetchParallel(url, isGz) {
+            let size = 0;
+            try {
+                const h = await fetch(url, { method: 'HEAD', cache: 'force-cache' });
+                if (!h.ok) return null;
+                size = Number(h.headers.get('content-length') || 0);
+            } catch (e) { return null; }
+            if (!size || size < 1e6) return null;
+            const n = 4, chunk = Math.ceil(size / n), parts = [];
+            let got = 0;
+            const t0 = performance.now();
+            const jobs = [];
+            for (let i = 0; i < n; i++) {
+                const s = i * chunk, e = Math.min(size - 1, (i + 1) * chunk - 1);
+                jobs.push((async () => {
+                    const r = await fetch(url, { headers: { Range: 'bytes=' + s + '-' + e }, cache: 'force-cache' });
+                    if (r.status !== 206) throw new Error('no-range');
+                    const b = new Uint8Array(await r.arrayBuffer());
+                    if (b.byteLength !== e - s + 1) throw new Error('short');
+                    parts[i] = b; got += b.byteLength;
+                    const secs = Math.max(0.2, (performance.now() - t0) / 1000);
+                    const total = isGz ? 6335827 : 8373440;
+                    loadPct = Math.min(0.99, got / total);
+                    setLoadMsg('下载模型 ' + (got / 1048576).toFixed(1) + 'MB · ' + Math.round(loadPct * 100) + '% · ' + Math.round(got / 1024 / secs) + 'KB/s');
+                })());
+            }
+            await Promise.all(jobs);
+            const out = new Uint8Array(size);
+            let off = 0;
+            for (let i = 0; i < n; i++) { out.set(parts[i], off); off += parts[i].byteLength; }
+            return out;
+        }
+
+        /* 带进度地取模型；先查本地缓存，再按 URL 列表顺序下载，成功后写回缓存 */
         async function getModelBuffer() {
             const cached = await idbGet('model_v1');
             if (cached && cached.byteLength > 1e6) {
@@ -705,10 +739,14 @@ window.addEventListener('keydown', (e) => {
                 const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
                 try {
                     loadStage = '模型 ' + (u + 1) + '/' + list.length;
+                    let buf = null;
+                    /* 先试 4 路并发分段；服务器不支持 Range 或有任何异常，就退回单连接流式 */
+                    try { buf = await fetchParallel(url, isGz); } catch (e0) { buf = null; }
+                    if (!buf) {
                     const r = await fetch(url, ctrl ? { cache: 'force-cache', signal: ctrl.signal } : { cache: 'force-cache' });
                     if (!r.ok) throw new Error('HTTP ' + r.status);
                     const total = isGz ? 6335827 : 8373440;   /* 按压缩后的真实字节算百分比 */
-                    let buf;
+                    const t0 = performance.now();
                     if (r.body && r.body.getReader) {
                         const reader = r.body.getReader();
                         const parts = [];
@@ -723,7 +761,8 @@ window.addEventListener('keydown', (e) => {
                                 lastByte = performance.now();
                                 parts.push(value); got += value.byteLength;
                                 loadPct = Math.min(0.99, got / total);
-                                setLoadMsg('下载模型 ' + (got / 1048576).toFixed(1) + '/8.0MB · ' + Math.round(loadPct * 100) + '%');
+                                const secs = Math.max(0.2, (performance.now() - t0) / 1000);
+                                setLoadMsg('下载模型 ' + (got / 1048576).toFixed(1) + 'MB · ' + Math.round(loadPct * 100) + '% · ' + Math.round(got / 1024 / secs) + 'KB/s');
                             }
                         } finally { clearInterval(guard); }
                         buf = new Uint8Array(got);
@@ -731,6 +770,7 @@ window.addEventListener('keydown', (e) => {
                         for (const p of parts) { buf.set(p, off); off += p.byteLength; }
                     } else {
                         buf = new Uint8Array(await r.arrayBuffer());
+                    }
                     }
                     if (isGz) {
                         const ds = new DecompressionStream('gzip');
