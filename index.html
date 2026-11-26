@@ -497,6 +497,42 @@ window.addEventListener('keydown', (e) => {
             const btn = document.getElementById('cam-retry');
             if (btn) btn.classList.toggle('show', state !== 'live' && state !== 'requesting');
             refreshHint();
+            try { camGuide(state, detail || ''); } catch (e) {}
+        }
+
+        /* 摄像头没起来时的兜底引导：全屏一个大按钮，顺便把失败原因写在按钮下面 */
+        function camDiagText() {
+            return 'secure=' + (window.isSecureContext ? 1 : 0)
+                + ' · media=' + ((navigator.mediaDevices && navigator.mediaDevices.getUserMedia) ? 1 : 0)
+                + ' · state=' + (CAM_STATE || 'idle')
+                + (window.__camErrName ? ' · ' + window.__camErrName : '');
+        }
+        function camGuide(state, detail) {
+            const bad = state !== 'live' && state !== 'requesting';
+            const el = document.getElementById('cam-guide');
+            if (!bad) { if (el) el.remove(); return; }
+            if (el) return;
+            const box = document.createElement('div');
+            box.id = 'cam-guide';
+            box.style.cssText = 'position:fixed;inset:0;z-index:70;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:rgba(6,6,8,.92);padding:26px;text-align:center;';
+            const btn = document.createElement('div');
+            btn.innerText = '开启摄像头';
+            btn.style.cssText = 'padding:18px 46px;border-radius:44px;font:700 22px "Microsoft YaHei",sans-serif;color:#1a1206;background:linear-gradient(180deg,#ffe9a8,#e0b955);box-shadow:0 10px 32px rgba(224,185,85,.45);cursor:pointer;';
+            const sub = document.createElement('div');
+            sub.className = 'g-sub';
+            sub.style.cssText = 'color:#9aa0a6;font:14px/1.6 "Microsoft YaHei",sans-serif;max-width:88vw;word-break:break-all;';
+            sub.innerText = (detail ? detail + '\n' : '') + camDiagText();
+            const tip = document.createElement('div');
+            tip.style.cssText = 'color:#ffe9a8;font:14px/1.7 "Microsoft YaHei",sans-serif;max-width:88vw;';
+            tip.innerText = '点了没反应就把下面这行发给我';
+            btn.addEventListener('click', async () => {
+                sub.innerText = '正在请求摄像头…';
+                const ok = await startCamera();
+                if (ok) { box.remove(); if (!loopStarted) predictWebcam(); return; }
+                sub.innerText = '仍然失败\n' + camDiagText() + '\n' + (window.__camErrMsg || '');
+            });
+            box.appendChild(btn); box.appendChild(tip); box.appendChild(sub);
+            document.body.appendChild(box);
         }
 
         async function startCamera() {
@@ -557,6 +593,7 @@ window.addEventListener('keydown', (e) => {
                 return true;
             } catch (e) {
                 const n = (e && e.name) || '';
+                window.__camErrName = n; window.__camErrMsg = (e && e.message) || String(e);
                 if (n === 'NotAllowedError' || n === 'SecurityError' || n === 'PermissionDeniedError') {
                     setCamState('denied', '在地址栏摄像头图标里允许');
                 } else if (n === 'NotReadableError' || n === 'TrackStartError' || n === 'AbortError') {
@@ -970,7 +1007,7 @@ window.addEventListener('keydown', (e) => {
             try{ inferCtx.drawImage(videoElement,0,0,w,h); drawFail=0; return inferCanvas; }catch(e){ drawFail=1; window.__drawErr=(e&&e.message)||String(e); return null; }
         }
         /* ---- 0×0 救援：手机 webview 常常“拿到摄像头流但 video 不解码”，改用 ImageCapture 直接抓帧 ---- */
-        let grabMode = 0, grabBusy = false, imgCap = null, grabErr = '', zeroSince = 0, tapPrompted = false;
+        let grabMode = 0, grabBusy = false, imgCap = null, grabErr = '', zeroSince = 0, tapPrompted = false, loopStarted = false;
         function tryImageCapture() {
             try {
                 if (!('ImageCapture' in window) || !camStream) return false;
@@ -1029,6 +1066,7 @@ window.addEventListener('keydown', (e) => {
         function predictWebcam(){
             const mob = !!window.IS_MOBILE;
             const now=performance.now();
+            loopStarted = true;
             /* 视频被系统暂停就继续播：iOS/安卓切后台再回来最常见的“画面在但推理不动” */
             if(videoElement&&videoElement.paused){ try{ videoElement.play(); }catch(e){} }
             let input=null;
