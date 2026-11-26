@@ -158,7 +158,7 @@
             .particle-scroll-container { max-height: 170px; }
 
             #gesture-hint { bottom: calc(70px + env(safe-area-inset-bottom)); font-size: 11px; }
-            #hand-hud { left: 6px; font-size: 10px; bottom: calc(96px + env(safe-area-inset-bottom)); padding: 3px 8px; }
+            #hand-hud { left: 6px; font-size: 12px; bottom: calc(96px + env(safe-area-inset-bottom)); padding: 3px 8px; max-width: 92vw; white-space: normal; }
             #webcam-wrapper { top: calc(6px + env(safe-area-inset-top)); left: 6px; right: auto; bottom: auto; width: 140px; height: 79px; }
             #photo-grid { width: 92% !important; }
 
@@ -880,7 +880,8 @@ window.addEventListener('keydown', (e) => {
             else if (window.IS_MOBILE && brightVal >= 0 && brightVal < 6) st = '画面全黑 · 换系统浏览器打开';
             else if (!hasHand) st = '手 ✗ 未进画面 · 退后一点';
             else st = '手 ✓ ' + (KIND_LABEL[gKindNow] || '识别中') + (window.IS_MOBILE && lastHandScore ? ' ' + lastHandScore : '');
-            el.innerText = '手势 · ' + st + (gFps ? ' · ' + gFps + 'fps' : '') + (window.IS_MOBILE && inferMs ? ' · ' + inferMs + 'ms' : '');
+            const dbg = window.IS_MOBILE ? (' · ' + (gFps || 0) + 'fps · ' + (inferMs || 0) + 'ms · ' + INFER_MODE_NAME[inferMode] + (videoElement ? ' ' + videoElement.videoWidth + '×' + videoElement.videoHeight : '')) : (gFps ? ' · ' + gFps + 'fps' : '');
+            el.innerText = '手势 · ' + st + dbg;
         }
         /* 调参用：控制台里可直接拿关键点试判定 */
         window.__gestureDebug = { isOkSign: (lm) => isOkSign(lm), fingersUp: (lm) => fingersUp(lm), okCircleMax: () => okCircleMax(),
@@ -916,7 +917,7 @@ window.addEventListener('keydown', (e) => {
         window.addEventListener('pagehide', () => {
             if (camStream) camStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
         });
-        function renderWebcamPreview(){const c=document.getElementById('webcam-canvas'),x=c.getContext('2d',{willReadFrequently:true});function d(){if(videoElement.readyState>=2)x.drawImage(videoElement,0,0,c.width,c.height);requestAnimationFrame(d)}d()}
+        function renderWebcamPreview(){const c=document.getElementById('webcam-canvas'),x=c.getContext('2d',{willReadFrequently:true});function d(){if(videoElement&&videoElement.readyState>=2){const vw=videoElement.videoWidth||16,vh=videoElement.videoHeight||9,ca=c.width/c.height,va=vw/vh;let sx=0,sy=0,sw=vw,sh=vh;if(va>ca){sw=vh*ca;sx=(vw-sw)/2}else{sh=vw/ca;sy=(vh-sh)/2}x.drawImage(videoElement,sx,sy,sw,sh,0,0,c.width,c.height)}requestAnimationFrame(d)}d()}
         let lvt=-1,lastDetect=0,lastTs=0,inferMs=0,lastHandScore=0;
         /* 手机端把画面缩到 320 宽再送推理：720p 纹理上采样太贵，缩完单帧快 3-4 倍 */
         const inferCanvas=document.createElement('canvas');
@@ -939,25 +940,44 @@ window.addEventListener('keydown', (e) => {
                 return sum/(d.length/4);
             }catch(e){ return -1; }
         }
-        let lastBrightT=0, brightVal=-1;
+        let lastBrightT=0, brightVal=-1, inferMode=0, lastHandAt=0, modeSwitchT=0;
+        const INFER_MODE_NAME = ['缩略图320', '原画', '缩略图480'];
+        function inferInput(){
+            if(inferMode===1) return videoElement;
+            const vw=videoElement.videoWidth||320, vh=videoElement.videoHeight||240;
+            const w = inferMode===2 ? 480 : 320;
+            const h = Math.round(w*vh/vw)||Math.round(w*0.75);
+            if(inferCanvas.width!==w||inferCanvas.height!==h){ inferCanvas.width=w; inferCanvas.height=h; }
+            try{ inferCtx.drawImage(videoElement,0,0,w,h); return inferCanvas; }catch(e){ return null; }
+        }
         function predictWebcam(){
             const mob = !!window.IS_MOBILE;
-            let input=videoElement;
-            if(mob){
-                input=grabFrame();
-                if(videoElement&&videoElement.paused){ try{ videoElement.play(); }catch(e){} }
-                if(input && performance.now()-lastBrightT>2000){ lastBrightT=performance.now(); brightVal=frameBrightness(); }
+            const now=performance.now();
+            /* 视频被系统暂停就继续播：iOS/安卓切后台再回来最常见的“画面在但推理不动” */
+            if(videoElement&&videoElement.paused){ try{ videoElement.play(); }catch(e){} }
+            let input=null;
+            if(videoElement&&videoElement.readyState>=2&&gestureRecognizer){
+                input = mob ? inferInput() : videoElement;
+                /* 12 秒一个人都抓不到就自动换输入方式：缩略图 → 原画 → 更大缩略图，逐档自愈 */
+                if(mob && now-lastHandAt>12000 && now-modeSwitchT>3000){
+                    modeSwitchT=now; lastHandAt=now;
+                    inferMode=(inferMode+1)%3;
+                    camMsg('识别不顺 · 自动切换成' + INFER_MODE_NAME[inferMode]);
+                }
+                if(input && performance.now()-lastBrightT>2000){ lastBrightT=now; brightVal=frameBrightness(); }
             }
-            if(input&&gestureRecognizer&&videoElement&&videoElement.readyState>=2&&(mob||videoElement.currentTime!==lvt)){
-                const now=performance.now();
+            if(input&&(mob||videoElement.currentTime!==lvt)){
                 /* 手机端目标 12-15fps，按上一帧真实耗时自适应拉开间隔，保证树不卡、识别不断 */
-                let gap = mob ? Math.max(66, Math.min(200, inferMs * 2)) : 90;
+                let gap = mob ? Math.max(66, Math.min(220, inferMs * 2)) : 90;
                 if(now-lastDetect>=gap && now-lastTs>=1){
                     lastDetect=now; lastTs=now; lvt=videoElement.currentTime;
                     let res=null; const t0=performance.now();
                     try{res=gestureRecognizer.recognizeForVideo(input,now);}catch(e){ window.__inferErr = (e&&e.message)||String(e); console.warn(e); }
                     inferMs = Math.round(performance.now()-t0);
-                    if(res){ lastHandScore = (res.gestures&&res.gestures.length&&res.gestures[0][0]) ? Math.round(res.gestures[0][0].score*100) : (res.landmarks&&res.landmarks.length ? 100 : 0); }
+                    if(res){
+                        lastHandScore = (res.gestures&&res.gestures.length&&res.gestures[0][0]) ? Math.round(res.gestures[0][0].score*100) : (res.landmarks&&res.landmarks.length ? 100 : 0);
+                        if(res.landmarks&&res.landmarks.length) lastHandAt=now;
+                    }
                     processGestures(res);
                     gFpsN++; if(now-gFpsT>=1000){ gFps=Math.max(1,Math.round(gFpsN*1000/(now-gFpsT))); gFpsN=0; gFpsT=now; }
                     refreshHint();
@@ -965,6 +985,11 @@ window.addEventListener('keydown', (e) => {
             }
             requestAnimationFrame(predictWebcam);
         }
+        /* 看门狗：不管识别有没有跑起来，每秒都刷新一次状态行，避免停在“就绪”两个字上瞎猜 */
+        setInterval(() => {
+            if (!window.__gestureReady) return;
+            updateHandHud(STATE.hand.detected);
+        }, 900);
 
         window.setupEvents=()=>{
             window.addEventListener('resize',()=>{camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);composer.setSize(window.innerWidth,window.innerHeight)});
