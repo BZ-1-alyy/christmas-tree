@@ -777,22 +777,28 @@ window.addEventListener('keydown', (e) => {
         async function initMediaPipe() {
             await startCamera();
             try {
+                if (!window.__gestureReady) { camMsg('手势引擎加载中… 首次约 10-30 秒'); updateHandHud(false); }
                 gestureRecognizer = await loadRecognizer();
                 if (!CAM_STATE || CAM_STATE === 'live') camMsg('请把手掌对着镜头');
+                updateHandHud(false);
                 predictWebcam();
             } catch (e) {
                 console.warn('gesture model failed', e);
+                updateHandHud(false);
                 if (CAM_STATE === 'live') setCamState('error', '手势模型加载失败，检查网络');
             }
         }
 
         (function bindCamRetry() {
             const b = document.getElementById('cam-retry');
-            if (b) b.addEventListener('click', () => { if (gestureRecognizer) startCamera(); else initMediaPipe(); });
+            if (b) b.addEventListener('click', () => {
+                if (gestureRecognizer) startCamera();
+                else { mpPromise = null; window.__gestureReady = false; window.__gestureErr = null; window.__mpSource = null; initMediaPipe(); }
+            });
         })();
 
-        // 页面空闲时预热手势模型，点重试/连摄像头时就不用再等 8MB
-        setTimeout(() => { loadRecognizer().catch(() => {}); }, 3000);
+        // 页面空闲时预热手势模型，点重试/连摄像头时就不用再等 9MB wasm + 8MB 模型
+        setTimeout(() => { updateHandHud(false); loadRecognizer().catch(() => {}).then(() => updateHandHud(false)); }, 3000);
 
         window.addEventListener('pagehide', () => {
             if (camStream) camStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
