@@ -1192,7 +1192,8 @@ window.addEventListener('keydown', (e) => {
                 if (el) {
                     const secs = Math.round((performance.now() - loadT0) / 1000);
                     el.innerText = '手势 · 加载中 ' + secs + 's · ' + (loadStage || '准备中')
-                        + (loadPct > 0 ? ' · ' + Math.round(loadPct * 100) + '%' : '');
+                        + (loadPct > 0 ? ' · ' + Math.round(loadPct * 100) + '%' : '')
+                        + (secs > 10 ? '（首次要下 6.3MB，下完存本地，下次秒开）' : '');
                 }
                 return;
             }
