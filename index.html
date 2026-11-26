@@ -567,15 +567,20 @@ window.addEventListener('keydown', (e) => {
                 camStream = stream;
                 videoElement = document.getElementById('webcam-video');
                 videoElement.srcObject = stream;
-                /* 手机浏览器会“优化掉”不在视口里、或者只有 2px 的 video，导致 readyState 一直上不去、画面永远 0 帧；
-                   把 video 塞进右下那个小预览框里（压在 canvas 底下、透明度 0.02），解码就稳定了 */
-                try {
-                    const wrap = document.getElementById('webcam-wrapper');
-                    if (wrap && videoElement.parentElement !== wrap) {
-                        videoElement.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;opacity:0.02;object-fit:cover;pointer-events:none;z-index:0;';
-                        wrap.insertBefore(videoElement, wrap.firstChild);
-                    }
-                } catch (e) {}
+                /* 手机端不再依赖 <video> 渲染：很多安卓 WebView 把流塞进 video 会渲染成红块/0×0，
+                   直接用 ImageCapture 从摄像头轨道抓帧，和 video 有没有画面完全无关 */
+                if (window.IS_MOBILE && 'ImageCapture' in window) {
+                    try { tryImageCapture(); } catch (e) {}
+                    try { videoElement.style.cssText = 'position:fixed;left:-2px;top:-2px;width:2px;height:2px;opacity:0.01;pointer-events:none;'; } catch (e) {}
+                } else {
+                    try {
+                        const wrap = document.getElementById('webcam-wrapper');
+                        if (wrap && videoElement.parentElement !== wrap) {
+                            videoElement.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;opacity:0.02;object-fit:cover;pointer-events:none;z-index:0;';
+                            wrap.insertBefore(videoElement, wrap.firstChild);
+                        }
+                    } catch (e) {}
+                }
                 await videoElement.play().catch(() => {});
                 /* 等首帧就绪：videoWidth 为 0 时送进识别器会直接拿到空结果 */
                 if (!videoElement.videoWidth) {
@@ -662,11 +667,13 @@ window.addEventListener('keydown', (e) => {
         async function idbGet(k) {
             try {
                 const db = await idbKV();
-                return await new Promise((res) => {
+                const v = await new Promise((res) => {
                     const q = db.transaction('kv', 'readonly').objectStore('kv').get(k);
                     q.onsuccess = () => res(q.result || null);
                     q.onerror = () => res(null);
                 });
+                try { db.close(); } catch (e) {}
+                return v;
             } catch (e) { return null; }
         }
         async function idbPut(k, v) {
@@ -678,6 +685,7 @@ window.addEventListener('keydown', (e) => {
                     tx.oncomplete = () => res(1);
                     tx.onerror = () => res(0);
                 });
+                try { db.close(); } catch (e) {}
             } catch (e) {}
         }
 
@@ -690,12 +698,17 @@ window.addEventListener('keydown', (e) => {
 
         /* 多连接分段下载：单个连接被限速时，4 路 Range 并发通常能把模型下载提速 2-4 倍 */
         async function fetchParallel(url, isGz) {
+            /* 先用 1 字节的 Range 探一下支不支持分段，不支持就立刻掐掉，绝不留后台下载把连接池堵死 */
             let size = 0;
+            const probeCtrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+            const probeTO = setTimeout(() => { try { probeCtrl && probeCtrl.abort(); } catch (e) {} }, 15000);
             try {
-                const h = await fetch(url, { method: 'HEAD', cache: 'force-cache' });
-                if (!h.ok) return null;
-                size = Number(h.headers.get('content-length') || 0);
-            } catch (e) { return null; }
+                const r = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'force-cache', signal: probeCtrl ? probeCtrl.signal : undefined });
+                if (r.status !== 206) { try { probeCtrl && probeCtrl.abort(); } catch (e) {} return null; }
+                const cr = r.headers.get('content-range') || '';
+                size = Number(cr.split('/')[1] || 0);
+                try { probeCtrl && probeCtrl.abort(); } catch (e) {}
+            } catch (e) { return null; } finally { clearTimeout(probeTO); }
             if (!size || size < 1e6) return null;
             const n = 4, chunk = Math.ceil(size / n), parts = [];
             let got = 0;
@@ -842,9 +855,11 @@ window.addEventListener('keydown', (e) => {
                 const rt = await rtP;
                 if (!rt) throw new Error('运行时加载失败');
                 setLoadMsg('引擎启动中…');
-                let model = await modelP;
+                let model = await withTimeout(modelP, 120000, 'model').catch(() => null);
                 if (!model) model = { path: MP_MODEL_LOCAL };
                 let rec = null;
+                loadStage = '引擎初始化'; loadPct = 0;
+                setLoadMsg('引擎初始化…');
                 try { rec = await makeRecognizer(rt.mod, rt.fileset, model); }
                 catch (e1) {
                     console.warn('recognizer build failed, retry with model path', e1);
@@ -1125,6 +1140,17 @@ window.addEventListener('keydown', (e) => {
                 const w = 320, h = Math.round(320 * vh / vw) || 240;
                 if (inferCanvas.width !== w || inferCanvas.height !== h) { inferCanvas.width = w; inferCanvas.height = h; }
                 inferCtx.drawImage(bmp, 0, 0, w, h);
+                /* 抓到的帧同时画到右下角预览框，用户能确定镜头真的在出画面 */
+                try {
+                    const pv = document.getElementById('webcam-canvas');
+                    if (pv) {
+                        const px = pv.getContext('2d');
+                        const ca = pv.width / pv.height, va = w / h;
+                        let sx = 0, sy = 0, sw = w, sh = h;
+                        if (va > ca) { sw = h * ca; sx = (w - sw) / 2; } else { sh = w / ca; sy = (h - sh) / 2; }
+                        px.drawImage(inferCanvas, sx, sy, sw, sh, 0, 0, pv.width, pv.height);
+                    }
+                } catch (e) {}
                 if (bmp.close) bmp.close();
                 drawFail = 0; return inferCanvas;
             } catch (e) { drawFail = 1; window.__drawErr = (e && e.message) || String(e); return null; }
@@ -1190,6 +1216,7 @@ window.addEventListener('keydown', (e) => {
             if (!window.__gestureReady) {
                 const el = document.getElementById('hand-hud');
                 if (el) {
+                    if (window.__gestureErr) { el.innerText = '手势 · 加载失败：' + String(window.__gestureErr).slice(0, 46); return; }
                     const secs = Math.round((performance.now() - loadT0) / 1000);
                     el.innerText = '手势 · 加载中 ' + secs + 's · ' + (loadStage || '准备中')
                         + (loadPct > 0 ? ' · ' + Math.round(loadPct * 100) + '%' : '')
