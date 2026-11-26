@@ -764,7 +764,8 @@ window.addEventListener('keydown', (e) => {
             const el = document.getElementById('hand-hud');
             if (!el) return;
             let st;
-            if (window.__gestureErr) st = '模型失败';
+            if (!CAM_STATE || CAM_STATE !== 'live') st = '等待摄像头';
+            else if (window.__gestureErr) st = '模型加载失败';
             else if (!window.__gestureReady) st = '模型加载中';
             else if (!hasHand) st = '手 ✗ 未进画面';
             else st = '手 ✓ ' + (KIND_LABEL[gKindNow] || '识别中');
