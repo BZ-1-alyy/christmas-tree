@@ -616,10 +616,18 @@ window.addEventListener('keydown', (e) => {
            模型与引擎运行时并行下载，模型带百分比进度并缓存进 IndexedDB，第二次打开基本秒开 */
         const MP_LOCAL = './mp';
         const MP_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+        /* 国内可用镜像（阿里 npm 镜像，CDN 走国内节点，实测 9.4MB 0.6 秒下来）——手机端第一优先 */
+        const MP_CN = 'https://registry.npmmirror.com/@mediapipe/tasks-vision/0.10.14/files';
         const MP_MODEL_LOCAL = 'gesture_recognizer.task';
         const MODEL_URLS = [
             'https://cdn.jsdelivr.net/gh/BZ-1-alyy/christmas-tree@main/gesture_recognizer.task',
             MP_MODEL_LOCAL,
+            'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task'
+        ];
+        const MODEL_URLS_CN = [
+            'https://fastly.jsdelivr.net/gh/BZ-1-alyy/christmas-tree@main/gesture_recognizer.task',
+            MP_MODEL_LOCAL,
+            'https://cdn.jsdelivr.net/gh/BZ-1-alyy/christmas-tree@main/gesture_recognizer.task',
             'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task'
         ];
         const OPEN_GESTURES = { Open_Palm: 1, Victory: 1, Pointing_Up: 1, ILoveYou: 1, Thumb_Up: 1 };
@@ -682,9 +690,7 @@ window.addEventListener('keydown', (e) => {
                 loadFromCache = true; loadPct = 1; setLoadMsg('模型本地缓存命中');
                 return new Uint8Array(cached);
             }
-            const urls = window.IS_MOBILE
-                ? [MODEL_URLS[1], MODEL_URLS[0], MODEL_URLS[2]]
-                : MODEL_URLS;
+            const urls = window.IS_MOBILE ? MODEL_URLS_CN : MODEL_URLS;
             const list = Array.from(new Set(urls));
             for (let u = 0; u < list.length; u++) {
                 const url = list[u];
@@ -737,9 +743,10 @@ window.addEventListener('keydown', (e) => {
         async function getRuntime() {
             if (rtCache) return rtCache;
             const cdn = { imp: MP_BASE + '/vision_bundle.mjs', wasm: MP_BASE + '/wasm', tag: 'cdn' };
+            const cn = { imp: MP_CN + '/vision_bundle.mjs', wasm: MP_CN + '/wasm', tag: 'cn' };
             const root = { imp: './vision_bundle.mjs', wasm: '.', tag: 'local:root' };
             const mp = { imp: MP_LOCAL + '/vision_bundle.mjs', wasm: MP_LOCAL, tag: 'local:mp' };
-            const bases = window.IS_MOBILE ? [root, mp, cdn] : [cdn, mp, root];
+            const bases = window.IS_MOBILE ? [cn, cdn, mp, root] : [cdn, cn, mp, root];
             for (let i = 0; i < bases.length; i++) {
                 const b = bases[i];
                 loadStage = '运行时 ' + (i + 1) + '/' + bases.length;
@@ -762,13 +769,14 @@ window.addEventListener('keydown', (e) => {
                 baseOptions: Object.assign({ delegate: delegate }, base),
                 runningMode: 'VIDEO', numHands: 1
             }, mpTuning());
-            /* 手机 GPU delegate 在部分安卓/微信内核里“假成功”——不报错但一帧都出不来，直接走 CPU 更稳 */
+            /* 手机 GPU delegate 在部分安卓/微信内核里“假成功”——不报错但一帧都出不来，直接走 CPU 更稳；
+               wasm 真正下载发生在这一步，所以必须带超时，否则后面网络挂了会无限等下去 */
             if (window.IS_MOBILE) {
-                try { return await mod.GestureRecognizer.createFromOptions(fileset, opts('CPU')); }
-                catch (e1) { console.warn('CPU recognizer failed, retry GPU', e1); return await mod.GestureRecognizer.createFromOptions(fileset, opts('GPU')); }
+                try { return await withTimeout(mod.GestureRecognizer.createFromOptions(fileset, opts('CPU')), 70000, 'create-cpu'); }
+                catch (e1) { console.warn('CPU recognizer failed, retry GPU', e1); return await withTimeout(mod.GestureRecognizer.createFromOptions(fileset, opts('GPU')), 50000, 'create-gpu'); }
             }
-            try { return await mod.GestureRecognizer.createFromOptions(fileset, opts('GPU')); }
-            catch (errGPU) { console.warn('GPU delegate failed, retry CPU', errGPU); return await mod.GestureRecognizer.createFromOptions(fileset, opts('CPU')); }
+            try { return await withTimeout(mod.GestureRecognizer.createFromOptions(fileset, opts('GPU')), 70000, 'create-gpu'); }
+            catch (errGPU) { console.warn('GPU delegate failed, retry CPU', errGPU); return await withTimeout(mod.GestureRecognizer.createFromOptions(fileset, opts('CPU')), 50000, 'create-cpu'); }
         }
 
         function loadRecognizer() {
