@@ -158,7 +158,7 @@
             .particle-scroll-container { max-height: 170px; }
 
             #gesture-hint { bottom: calc(70px + env(safe-area-inset-bottom)); font-size: 11px; }
-            #hand-hud { left: 6px; font-size: 12px; bottom: calc(96px + env(safe-area-inset-bottom)); padding: 3px 8px; max-width: 92vw; white-space: normal; }
+            #hand-hud { left: 6px; font-size: 10px; bottom: calc(96px + env(safe-area-inset-bottom)); padding: 3px 8px; }
             #webcam-wrapper { top: calc(6px + env(safe-area-inset-top)); left: 6px; right: auto; bottom: auto; width: 140px; height: 79px; }
             #photo-grid { width: 92% !important; }
 
@@ -497,42 +497,6 @@ window.addEventListener('keydown', (e) => {
             const btn = document.getElementById('cam-retry');
             if (btn) btn.classList.toggle('show', state !== 'live' && state !== 'requesting');
             refreshHint();
-            try { camGuide(state, detail || ''); } catch (e) {}
-        }
-
-        /* 摄像头没起来时的兜底引导：全屏一个大按钮，顺便把失败原因写在按钮下面 */
-        function camDiagText() {
-            return 'secure=' + (window.isSecureContext ? 1 : 0)
-                + ' · media=' + ((navigator.mediaDevices && navigator.mediaDevices.getUserMedia) ? 1 : 0)
-                + ' · state=' + (CAM_STATE || 'idle')
-                + (window.__camErrName ? ' · ' + window.__camErrName : '');
-        }
-        function camGuide(state, detail) {
-            const bad = state !== 'live' && state !== 'requesting';
-            const el = document.getElementById('cam-guide');
-            if (!bad) { if (el) el.remove(); return; }
-            if (el) return;
-            const box = document.createElement('div');
-            box.id = 'cam-guide';
-            box.style.cssText = 'position:fixed;inset:0;z-index:70;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:rgba(6,6,8,.92);padding:26px;text-align:center;';
-            const btn = document.createElement('div');
-            btn.innerText = '开启摄像头';
-            btn.style.cssText = 'padding:18px 46px;border-radius:44px;font:700 22px "Microsoft YaHei",sans-serif;color:#1a1206;background:linear-gradient(180deg,#ffe9a8,#e0b955);box-shadow:0 10px 32px rgba(224,185,85,.45);cursor:pointer;';
-            const sub = document.createElement('div');
-            sub.className = 'g-sub';
-            sub.style.cssText = 'color:#9aa0a6;font:14px/1.6 "Microsoft YaHei",sans-serif;max-width:88vw;word-break:break-all;';
-            sub.innerText = (detail ? detail + '\n' : '') + camDiagText();
-            const tip = document.createElement('div');
-            tip.style.cssText = 'color:#ffe9a8;font:14px/1.7 "Microsoft YaHei",sans-serif;max-width:88vw;';
-            tip.innerText = '点了没反应就把下面这行发给我';
-            btn.addEventListener('click', async () => {
-                sub.innerText = '正在请求摄像头…';
-                const ok = await startCamera();
-                if (ok) { box.remove(); if (!loopStarted) predictWebcam(); return; }
-                sub.innerText = '仍然失败\n' + camDiagText() + '\n' + (window.__camErrMsg || '');
-            });
-            box.appendChild(btn); box.appendChild(tip); box.appendChild(sub);
-            document.body.appendChild(box);
         }
 
         async function startCamera() {
@@ -567,20 +531,6 @@ window.addEventListener('keydown', (e) => {
                 camStream = stream;
                 videoElement = document.getElementById('webcam-video');
                 videoElement.srcObject = stream;
-                /* 手机端不再依赖 <video> 渲染：很多安卓 WebView 把流塞进 video 会渲染成红块/0×0，
-                   直接用 ImageCapture 从摄像头轨道抓帧，和 video 有没有画面完全无关 */
-                if (window.IS_MOBILE && 'ImageCapture' in window) {
-                    try { tryImageCapture(); } catch (e) {}
-                    try { videoElement.style.cssText = 'position:fixed;left:-2px;top:-2px;width:2px;height:2px;opacity:0.01;pointer-events:none;'; } catch (e) {}
-                } else {
-                    try {
-                        const wrap = document.getElementById('webcam-wrapper');
-                        if (wrap && videoElement.parentElement !== wrap) {
-                            videoElement.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;opacity:0.02;object-fit:cover;pointer-events:none;z-index:0;';
-                            wrap.insertBefore(videoElement, wrap.firstChild);
-                        }
-                    } catch (e) {}
-                }
                 await videoElement.play().catch(() => {});
                 /* 等首帧就绪：videoWidth 为 0 时送进识别器会直接拿到空结果 */
                 if (!videoElement.videoWidth) {
@@ -598,7 +548,6 @@ window.addEventListener('keydown', (e) => {
                 return true;
             } catch (e) {
                 const n = (e && e.name) || '';
-                window.__camErrName = n; window.__camErrMsg = (e && e.message) || String(e);
                 if (n === 'NotAllowedError' || n === 'SecurityError' || n === 'PermissionDeniedError') {
                     setCamState('denied', '在地址栏摄像头图标里允许');
                 } else if (n === 'NotReadableError' || n === 'TrackStartError' || n === 'AbortError') {
@@ -617,257 +566,59 @@ window.addEventListener('keydown', (e) => {
         }
 
         // ===================== 手势识别：GestureRecognizer（移植自 christmas-tree.html 新版）=====================
-        /* 加载策略：jsDelivr（快、可长缓存）优先，本地 mp/ 兜底，最后才 googleapis；
-           模型与引擎运行时并行下载，模型带百分比进度并缓存进 IndexedDB，第二次打开基本秒开 */
+        /* 运行时全部走本地 mp/：手机在国内网络下取 jsdelivr / googleapis 常失败，本地包一断网也能用 */
         const MP_LOCAL = './mp';
-        const MP_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
-        /* 国内可用镜像（阿里 npm 镜像，CDN 走国内节点，实测 9.4MB 0.6 秒下来）——手机端第一优先 */
-        const MP_CN = 'https://registry.npmmirror.com/@mediapipe/tasks-vision/0.10.14/files';
-        const MP_MODEL_LOCAL = 'gesture_recognizer.task';
-        const MODEL_URLS = [
-            'https://cdn.jsdelivr.net/gh/BZ-1-alyy/christmas-tree@main/gesture_recognizer.task',
-            MP_MODEL_LOCAL,
-            'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task'
-        ];
-        const MODEL_GZ_URLS = [
-            'gesture_recognizer.task.gz',
-            'https://fastly.jsdelivr.net/gh/BZ-1-alyy/christmas-tree@main/gesture_recognizer.task.gz',
-            'https://cdn.jsdelivr.net/gh/BZ-1-alyy/christmas-tree@main/gesture_recognizer.task.gz'
-        ];
-        const MODEL_URLS_CN = [
-            'https://fastly.jsdelivr.net/gh/BZ-1-alyy/christmas-tree@main/gesture_recognizer.task',
-            'https://cdn.jsdelivr.net/gh/BZ-1-alyy/christmas-tree@main/gesture_recognizer.task',
-            MP_MODEL_LOCAL,
-            'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task'
-        ];
+        const MP_BASE = 'https://fastly.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+        const MP_MODEL_LOCAL = 'gesture_recognizer.task';   // 与 index.html 同目录：Pages / 本地服务器都能直接取，不用连 googleapis
+        const MP_MODEL = 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task';
         const OPEN_GESTURES = { Open_Palm: 1, Victory: 1, Pointing_Up: 1, ILoveYou: 1, Thumb_Up: 1 };
         let mpPromise = null, gPending = null, gPendingN = 0, gLastKind = null, gSeenT = 0, gOkCool = 0, wagLastY = null, wagDir = 0, wagCool = 0;
         let gKindNow = null, gFps = 0, gFpsN = 0, gFpsT = 0, gLastResT = 0;
-        let loadPct = 0, loadFromCache = false, loadMsgText = '', loadStage = '', loadT0 = 0;
 
         function mpTuning() {
-            /* 手机摄像头噪点大、手离得远、画面还是横的，阈值必须比桌面松得多，否则一直“未识别到手” */
+            /* 手机摄像头噪点大、手离得远，阈值必须比桌面松，否则一直“未识别到手” */
             const mob = !!window.IS_MOBILE;
             return {
-                minHandDetectionConfidence: mob ? 0.25 : 0.5,
-                minHandPresenceConfidence: mob ? 0.25 : 0.5,
-                minTrackingConfidence: mob ? 0.15 : 0.5
+                minHandDetectionConfidence: mob ? 0.3 : 0.5,
+                minHandPresenceConfidence: mob ? 0.3 : 0.5,
+                minTrackingConfidence: mob ? 0.25 : 0.5
             };
         }
 
-        /* 极简 IndexedDB 键值缓存，只存模型 8MB，避免每次打开都重下 */
-        function idbKV() {
-            return new Promise((res, rej) => {
-                const r = indexedDB.open('GrandTreeMP', 1);
-                r.onupgradeneeded = () => { try { r.result.createObjectStore('kv'); } catch (e) {} };
-                r.onsuccess = () => res(r.result);
-                r.onerror = () => rej(r.error);
-            });
-        }
-        async function idbGet(k) {
-            try {
-                const db = await idbKV();
-                const v = await new Promise((res) => {
-                    const q = db.transaction('kv', 'readonly').objectStore('kv').get(k);
-                    q.onsuccess = () => res(q.result || null);
-                    q.onerror = () => res(null);
-                });
-                try { db.close(); } catch (e) {}
-                return v;
-            } catch (e) { return null; }
-        }
-        async function idbPut(k, v) {
-            try {
-                const db = await idbKV();
-                await new Promise((res) => {
-                    const tx = db.transaction('kv', 'readwrite');
-                    tx.objectStore('kv').put(v, k);
-                    tx.oncomplete = () => res(1);
-                    tx.onerror = () => res(0);
-                });
-                try { db.close(); } catch (e) {}
-            } catch (e) {}
-        }
-
-        function setLoadMsg(text) {
-            loadMsgText = text;
-            camMsg(text);
-            const h = document.getElementById('hand-hud');
-            if (h) h.innerText = '手势 · ' + text;
-        }
-
-        /* 多连接分段下载：单个连接被限速时，4 路 Range 并发通常能把模型下载提速 2-4 倍 */
-        async function fetchParallel(url, isGz) {
-            /* 先用 1 字节的 Range 探一下支不支持分段，不支持就立刻掐掉，绝不留后台下载把连接池堵死 */
-            let size = 0;
-            const probeCtrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-            const probeTO = setTimeout(() => { try { probeCtrl && probeCtrl.abort(); } catch (e) {} }, 15000);
-            try {
-                const r = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'force-cache', signal: probeCtrl ? probeCtrl.signal : undefined });
-                if (r.status !== 206) { try { probeCtrl && probeCtrl.abort(); } catch (e) {} return null; }
-                const cr = r.headers.get('content-range') || '';
-                size = Number(cr.split('/')[1] || 0);
-                try { probeCtrl && probeCtrl.abort(); } catch (e) {}
-            } catch (e) { return null; } finally { clearTimeout(probeTO); }
-            if (!size || size < 1e6) return null;
-            const n = 4, chunk = Math.ceil(size / n), parts = [];
-            let got = 0;
-            const t0 = performance.now();
-            const jobs = [];
-            for (let i = 0; i < n; i++) {
-                const s = i * chunk, e = Math.min(size - 1, (i + 1) * chunk - 1);
-                jobs.push((async () => {
-                    const r = await fetch(url, { headers: { Range: 'bytes=' + s + '-' + e }, cache: 'force-cache' });
-                    if (r.status !== 206) throw new Error('no-range');
-                    const b = new Uint8Array(await r.arrayBuffer());
-                    if (b.byteLength !== e - s + 1) throw new Error('short');
-                    parts[i] = b; got += b.byteLength;
-                    const secs = Math.max(0.2, (performance.now() - t0) / 1000);
-                    const total = isGz ? 6335827 : 8373440;
-                    loadPct = Math.min(0.99, got / total);
-                    setLoadMsg('下载模型 ' + (got / 1048576).toFixed(1) + 'MB · ' + Math.round(loadPct * 100) + '% · ' + Math.round(got / 1024 / secs) + 'KB/s');
-                })());
-            }
-            await Promise.all(jobs);
-            const out = new Uint8Array(size);
-            let off = 0;
-            for (let i = 0; i < n; i++) { out.set(parts[i], off); off += parts[i].byteLength; }
-            return out;
-        }
-
-        /* 带进度地取模型；先查本地缓存，再按 URL 列表顺序下载，成功后写回缓存 */
-        async function getModelBuffer() {
-            const cached = await idbGet('model_v1');
-            if (cached && cached.byteLength > 1e6) {
-                loadFromCache = true; loadPct = 1; setLoadMsg('模型本地缓存命中');
-                return new Uint8Array(cached);
-            }
-            /* gz 版模型 6.3MB，比 8.4MB 原版少 24%，浏览器端解压；不支持 DecompressionStream 就用原版 */
-            const gzOK = (typeof DecompressionStream !== 'undefined');
-            const urls = (gzOK ? MODEL_GZ_URLS.concat(window.IS_MOBILE ? MODEL_URLS_CN : MODEL_URLS) : (window.IS_MOBILE ? MODEL_URLS_CN : MODEL_URLS));
-            const list = Array.from(new Set(urls));
-            for (let u = 0; u < list.length; u++) {
-                const url = list[u];
-                const isGz = /\.gz(\?|$)/.test(url);
-                const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-                try {
-                    loadStage = '模型 ' + (u + 1) + '/' + list.length;
-                    let buf = null;
-                    /* 先试 4 路并发分段；服务器不支持 Range 或有任何异常，就退回单连接流式 */
-                    try { buf = await fetchParallel(url, isGz); } catch (e0) { buf = null; }
-                    if (!buf) {
-                    const r = await fetch(url, ctrl ? { cache: 'force-cache', signal: ctrl.signal } : { cache: 'force-cache' });
-                    if (!r.ok) throw new Error('HTTP ' + r.status);
-                    const total = isGz ? 6335827 : 8373440;   /* 按压缩后的真实字节算百分比 */
-                    const t0 = performance.now();
-                    if (r.body && r.body.getReader) {
-                        const reader = r.body.getReader();
-                        const parts = [];
-                        let got = 0;
-                        let lastByte = performance.now();
-                        /* 10 秒一个字节都没收到就判这路断了，换下一路，不要干等 */
-                        const guard = setInterval(() => { if (ctrl && performance.now() - lastByte > 10000) { try { ctrl.abort(); } catch (e) {} } }, 1000);
-                        try {
-                            while (true) {
-                                const { done, value } = await reader.read();
-                                if (done) break;
-                                lastByte = performance.now();
-                                parts.push(value); got += value.byteLength;
-                                loadPct = Math.min(0.99, got / total);
-                                const secs = Math.max(0.2, (performance.now() - t0) / 1000);
-                                setLoadMsg('下载模型 ' + (got / 1048576).toFixed(1) + 'MB · ' + Math.round(loadPct * 100) + '% · ' + Math.round(got / 1024 / secs) + 'KB/s');
-                            }
-                        } finally { clearInterval(guard); }
-                        buf = new Uint8Array(got);
-                        let off = 0;
-                        for (const p of parts) { buf.set(p, off); off += p.byteLength; }
-                    } else {
-                        buf = new Uint8Array(await r.arrayBuffer());
-                    }
-                    }
-                    if (isGz) {
-                        const ds = new DecompressionStream('gzip');
-                        buf = new Uint8Array(await new Response(new Blob([buf]).stream().pipeThrough(ds)).arrayBuffer());
-                    }
-                    if (buf.byteLength < 1e6) throw new Error('模型文件异常');
-                    idbPut('model_v1', buf.buffer.slice(0)).catch(() => {});
-                    loadPct = 1;
-                    setLoadMsg('模型就绪');
-                    return buf;
-                } catch (e) { console.warn('model source failed', url, e); }
-            }
-            return null;
-        }
-
-        let rtCache = null;
-        function withTimeout(p, ms, label) {
-            return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('超时:' + label)), ms))]);
-        }
-        /* 运行时（vision_bundle.mjs + wasm）：手机优先同源（GitHub Pages 直连最稳，jsDelivr 国内经常性挂住），
-           桌面优先 jsDelivr；每一档都带超时，卡住会自己跳到下一档 */
-        async function getRuntime() {
-            if (rtCache) return rtCache;
-            const cdn = { imp: MP_BASE + '/vision_bundle.mjs', wasm: MP_BASE + '/wasm', tag: 'cdn' };
-            const cn = { imp: MP_CN + '/vision_bundle.mjs', wasm: MP_CN + '/wasm', tag: 'cn' };
-            const root = { imp: './vision_bundle.mjs', wasm: '.', tag: 'local:root' };
-            const mp = { imp: MP_LOCAL + '/vision_bundle.mjs', wasm: MP_LOCAL, tag: 'local:mp' };
-            const bases = window.IS_MOBILE ? [cn, cdn, mp, root] : [cdn, cn, mp, root];
-            for (let i = 0; i < bases.length; i++) {
-                const b = bases[i];
-                loadStage = '运行时 ' + (i + 1) + '/' + bases.length;
-                try {
-                    const mod = await withTimeout(import(b.imp), 45000, 'import');
-                    const fileset = await withTimeout(mod.FilesetResolver.forVisionTasks(b.wasm), 90000, 'wasm');
-                    rtCache = { mod: mod, fileset: fileset, base: b.wasm };
-                    window.__mpSource = b.tag;
-                    return rtCache;
-                } catch (e) { console.warn('runtime base failed', b.tag, e); }
-            }
-            throw new Error('vision runtime unavailable');
-        }
-
-        async function makeRecognizer(mod, fileset, model) {
-            const base = {};
-            if (model && model.buffer) base.modelAssetBuffer = model.buffer;
-            else base.modelAssetPath = model.path;
+        async function makeRecognizer(mod, fileset, modelPath) {
             const opts = (delegate) => Object.assign({
-                baseOptions: Object.assign({ delegate: delegate }, base),
+                baseOptions: { modelAssetPath: modelPath, delegate: delegate },
                 runningMode: 'VIDEO', numHands: 1
             }, mpTuning());
-            /* 手机 GPU delegate 在部分安卓/微信内核里“假成功”——不报错但一帧都出不来，直接走 CPU 更稳；
-               wasm 真正下载发生在这一步，所以必须带超时，否则后面网络挂了会无限等下去 */
-            if (window.IS_MOBILE) {
-                try { return await withTimeout(mod.GestureRecognizer.createFromOptions(fileset, opts('CPU')), 70000, 'create-cpu'); }
-                catch (e1) { console.warn('CPU recognizer failed, retry GPU', e1); return await withTimeout(mod.GestureRecognizer.createFromOptions(fileset, opts('GPU')), 50000, 'create-gpu'); }
-            }
-            try { return await withTimeout(mod.GestureRecognizer.createFromOptions(fileset, opts('GPU')), 70000, 'create-gpu'); }
-            catch (errGPU) { console.warn('GPU delegate failed, retry CPU', errGPU); return await withTimeout(mod.GestureRecognizer.createFromOptions(fileset, opts('CPU')), 50000, 'create-cpu'); }
+            try { return await mod.GestureRecognizer.createFromOptions(fileset, opts('GPU')); }
+            catch (errGPU) { console.warn('GPU delegate failed, retry CPU', errGPU); return await mod.GestureRecognizer.createFromOptions(fileset, opts('CPU')); }
+        }
+
+        /* 本地优先：mp/ 子目录 → 与 index.html 同级 → 最后才回落到 CDN；任一环节失败自动换下一种 */
+        async function tryLocalRuntime(base) {
+            const mod = await import(base + '/vision_bundle.mjs');
+            const fileset = await mod.FilesetResolver.forVisionTasks(base);
+            const rec = await makeRecognizer(mod, fileset, MP_MODEL_LOCAL);
+            window.__mpSource = 'local:' + base;
+            return rec;
         }
 
         function loadRecognizer() {
             if (mpPromise) return mpPromise;
             mpPromise = (async () => {
-                loadT0 = performance.now();
-                if (!window.__gestureReady) setLoadMsg('加载手势引擎…');
-                /* 模型与运行时并行，谁慢等谁 */
-                const modelP = getModelBuffer().catch(() => null);
-                const rtP = getRuntime().catch(() => null);
-                const rt = await rtP;
-                if (!rt) throw new Error('运行时加载失败');
-                setLoadMsg('引擎启动中…');
-                let model = await withTimeout(modelP, 120000, 'model').catch(() => null);
-                if (!model) model = { path: MP_MODEL_LOCAL };
-                let rec = null;
-                loadStage = '引擎初始化'; loadPct = 0;
-                setLoadMsg('引擎初始化…');
-                try { rec = await makeRecognizer(rt.mod, rt.fileset, model); }
-                catch (e1) {
-                    console.warn('recognizer build failed, retry with model path', e1);
-                    rec = await makeRecognizer(rt.mod, rt.fileset, { path: MP_MODEL_LOCAL });
+                let lastErr = null;
+                for (const base of [MP_LOCAL, '.']) {
+                    try {
+                        const rec = await tryLocalRuntime(base);
+                        window.__gestureReady = true;
+                        return rec;
+                    } catch (e) { lastErr = e; console.warn('local runtime failed at ' + base, e); }
                 }
+                const mod = await import(MP_BASE + '/vision_bundle.mjs');
+                const fileset = await mod.FilesetResolver.forVisionTasks(MP_BASE + '/wasm');
+                const rec = await makeRecognizer(mod, fileset, MP_MODEL);
+                window.__mpSource = 'cdn';
                 window.__gestureReady = true;
-                window.__modelFromCache = loadFromCache;
-                setLoadMsg('引擎就绪');
                 return rec;
             })();
             mpPromise.catch((e) => { mpPromise = null; window.__gestureErr = (e && e.message) || String(e); });
@@ -1013,35 +764,22 @@ window.addEventListener('keydown', (e) => {
             const el = document.getElementById('hand-hud');
             if (!el) return;
             let st;
-            if (window.__gestureErr) st = '模型加载失败';
-            else if (!window.__gestureReady) st = loadMsgText || '模型加载中';
-            else if (!CAM_STATE || CAM_STATE !== 'live') st = '等待摄像头';
-            else if (window.IS_MOBILE && brightVal >= 0 && brightVal < 6) st = '画面全黑 · 换系统浏览器打开';
-            else if (!hasHand) st = '手 ✗ 未进画面 · 退后一点';
-            else st = '手 ✓ ' + (KIND_LABEL[gKindNow] || '识别中') + (window.IS_MOBILE && lastHandScore ? ' ' + lastHandScore : '');
-            let dbg = '';
-            if (window.IS_MOBILE) {
-                dbg = ' · ' + (gFps || 0) + 'fps · ' + (inferMs || 0) + 'ms · ';
-                if (grabMode === 1) {
-                    dbg += '抓帧模式' + (grabErr ? '!' + grabErr.slice(0, 12) : '') + ' ' + rDets + '/' + rTicks;
-                } else {
-                    dbg += (videoElement ? videoElement.videoWidth + '×' + videoElement.videoHeight + ' rs' + videoElement.readyState : 'no-video');
-                    if (drawFail) dbg += ' 抓帧失败';
-                    dbg += ' · ' + rDets + '/' + rTicks;
-                }
-            } else if (gFps) { dbg = ' · ' + gFps + 'fps'; }
-            el.innerText = '手势 · ' + st + dbg;
+            if (!CAM_STATE || CAM_STATE !== 'live') st = '等待摄像头';
+            else if (window.__gestureErr) st = '模型加载失败';
+            else if (!window.__gestureReady) st = '模型加载中';
+            else if (!hasHand) st = '手 ✗ 未进画面';
+            else st = '手 ✓ ' + (KIND_LABEL[gKindNow] || '识别中');
+            el.innerText = '手势 · ' + st + (gFps ? ' · ' + gFps + 'fps' : '');
         }
         /* 调参用：控制台里可直接拿关键点试判定 */
         window.__gestureDebug = { isOkSign: (lm) => isOkSign(lm), fingersUp: (lm) => fingersUp(lm), okCircleMax: () => okCircleMax(),
             feed: (lm) => processGestures({ landmarks: [lm], gestures: [] }) };
 
         async function initMediaPipe() {
-            const recP = loadRecognizer();          // 先开始下载模型，不用等摄像头授权
             await startCamera();
             try {
-                updateHandHud(false);
-                gestureRecognizer = await recP;
+                if (!window.__gestureReady) { camMsg('手势引擎加载中… 首次约 10-30 秒'); updateHandHud(false); }
+                gestureRecognizer = await loadRecognizer();
                 if (!CAM_STATE || CAM_STATE === 'live') camMsg('请把手掌对着镜头');
                 updateHandHud(false);
                 predictWebcam();
@@ -1066,166 +804,26 @@ window.addEventListener('keydown', (e) => {
         window.addEventListener('pagehide', () => {
             if (camStream) camStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
         });
-        function renderWebcamPreview(){const c=document.getElementById('webcam-canvas'),x=c.getContext('2d',{willReadFrequently:true});function d(){if(videoElement&&videoElement.readyState>=2){const vw=videoElement.videoWidth||16,vh=videoElement.videoHeight||9,ca=c.width/c.height,va=vw/vh;let sx=0,sy=0,sw=vw,sh=vh;if(va>ca){sw=vh*ca;sx=(vw-sw)/2}else{sh=vw/ca;sy=(vh-sh)/2}x.drawImage(videoElement,sx,sy,sw,sh,0,0,c.width,c.height)}requestAnimationFrame(d)}d()}
-        let lvt=-1,lastDetect=0,lastTs=0,inferMs=0,lastHandScore=0;
-        /* 手机端把画面缩到 320 宽再送推理：720p 纹理上采样太贵，缩完单帧快 3-4 倍 */
-        const inferCanvas=document.createElement('canvas');
-        inferCanvas.width=320; inferCanvas.height=240;
-        const inferCtx=inferCanvas.getContext('2d',{willReadFrequently:true});
-        function grabFrame(){
-            if(!videoElement||videoElement.readyState<2) return null;
-            const vw=videoElement.videoWidth||320, vh=videoElement.videoHeight||240;
-            const w=320, h=Math.round(320*vh/vw)||240;
-            if(inferCanvas.width!==w||inferCanvas.height!==h){ inferCanvas.width=w; inferCanvas.height=h; }
-            try{ inferCtx.drawImage(videoElement,0,0,w,h); drawFail=0; return inferCanvas; }catch(e){ drawFail=1; window.__drawErr=(e&&e.message)||String(e); return null; }
-        }
-        function frameBrightness(){
-            try{
-                const c=document.createElement('canvas'); c.width=16; c.height=12;
-                const x=c.getContext('2d',{willReadFrequently:true});
-                x.drawImage(inferCanvas,0,0,16,12);
-                const d=x.getImageData(0,0,16,12).data; let sum=0;
-                for(let i=0;i<d.length;i+=4) sum+=(d[i]+d[i+1]+d[i+2])/3;
-                return sum/(d.length/4);
-            }catch(e){ return -1; }
-        }
-        let lastBrightT=0, brightVal=-1, inferMode=0, lastHandAt=0, modeSwitchT=0, rTicks=0, rDets=0, drawFail=0;
-        const INFER_MODE_NAME = ['缩略图320', '原画', '缩略图480'];
-        function inferInput(){
-            if(inferMode===1) return videoElement;
-            const vw=videoElement.videoWidth||320, vh=videoElement.videoHeight||240;
-            const w = inferMode===2 ? 480 : 320;
-            const h = Math.round(w*vh/vw)||Math.round(w*0.75);
-            if(inferCanvas.width!==w||inferCanvas.height!==h){ inferCanvas.width=w; inferCanvas.height=h; }
-            try{ inferCtx.drawImage(videoElement,0,0,w,h); drawFail=0; return inferCanvas; }catch(e){ drawFail=1; window.__drawErr=(e&&e.message)||String(e); return null; }
-        }
-        /* ---- 0×0 救援：手机 webview 常常“拿到摄像头流但 video 不解码”，改用 ImageCapture 直接抓帧 ---- */
-        let grabMode = 0, grabBusy = false, imgCap = null, grabErr = '', zeroSince = 0, tapPrompted = false, loopStarted = false;
-        function tryImageCapture() {
-            try {
-                if (!('ImageCapture' in window) || !camStream) return false;
-                const t = camStream.getVideoTracks()[0];
-                if (!t) return false;
-                imgCap = new ImageCapture(t);
-                grabMode = 1;
-                return true;
-            } catch (e) { grabErr = (e && e.message) || String(e); return false; }
-        }
-        function kickVideo() {
-            if (!camStream || !videoElement) return;
-            try {
-                videoElement.srcObject = null;
-                videoElement.srcObject = camStream;
-                videoElement.play().catch(e => { window.__playErr = (e && e.message) || String(e); });
-            } catch (e) {}
-        }
-        function needTapPrompt(on) {
-            let el = document.getElementById('cam-tap');
-            if (!on) { if (el) el.remove(); return; }
-            if (el) return;
-            el = document.createElement('div');
-            el.id = 'cam-tap';
-            el.style.cssText = 'position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.86);color:#ffe9a8;font:600 20px/1.7 "Microsoft YaHei",sans-serif;text-align:center;padding:24px;';
-            el.innerText = '摄像头没有出画面\n点一下这里启动';
-            el.style.whiteSpace = 'pre-line';
-            el.addEventListener('click', () => {
-                kickVideo(); tryImageCapture();
-                setTimeout(() => { if (videoElement && videoElement.videoWidth > 0) needTapPrompt(false); }, 1500);
-            });
-            document.body.appendChild(el);
-        }
-        function drawBitmap(bmp) {
-            try {
-                const vw = bmp.width || 320, vh = bmp.height || 240;
-                const w = 320, h = Math.round(320 * vh / vw) || 240;
-                if (inferCanvas.width !== w || inferCanvas.height !== h) { inferCanvas.width = w; inferCanvas.height = h; }
-                inferCtx.drawImage(bmp, 0, 0, w, h);
-                /* 抓到的帧同时画到右下角预览框，用户能确定镜头真的在出画面 */
-                try {
-                    const pv = document.getElementById('webcam-canvas');
-                    if (pv) {
-                        const px = pv.getContext('2d');
-                        const ca = pv.width / pv.height, va = w / h;
-                        let sx = 0, sy = 0, sw = w, sh = h;
-                        if (va > ca) { sw = h * ca; sx = (w - sw) / 2; } else { sh = w / ca; sy = (h - sh) / 2; }
-                        px.drawImage(inferCanvas, sx, sy, sw, sh, 0, 0, pv.width, pv.height);
-                    }
-                } catch (e) {}
-                if (bmp.close) bmp.close();
-                drawFail = 0; return inferCanvas;
-            } catch (e) { drawFail = 1; window.__drawErr = (e && e.message) || String(e); return null; }
-        }
-        function runDetect(input, now) {
-            let res = null; const t0 = performance.now();
-            try { res = gestureRecognizer.recognizeForVideo(input, now); } catch (e) { window.__inferErr = (e && e.message) || String(e); console.warn(e); }
-            inferMs = Math.round(performance.now() - t0);
-            if (res) {
-                lastHandScore = (res.gestures && res.gestures.length && res.gestures[0][0]) ? Math.round(res.gestures[0][0].score * 100) : (res.landmarks && res.landmarks.length ? 100 : 0);
-                if (res.landmarks && res.landmarks.length) lastHandAt = performance.now();
-            }
-            processGestures(res);
-            gFpsN++; if (now - gFpsT >= 1000) { gFps = Math.max(1, Math.round(gFpsN * 1000 / (now - gFpsT))); gFpsN = 0; gFpsT = now; }
-            refreshHint();
-        }
+        function renderWebcamPreview(){const c=document.getElementById('webcam-canvas'),x=c.getContext('2d',{willReadFrequently:true});function d(){if(videoElement.readyState>=2)x.drawImage(videoElement,0,0,c.width,c.height);requestAnimationFrame(d)}d()}
+        let lvt=-1,lastDetect=0;
         function predictWebcam(){
             const mob = !!window.IS_MOBILE;
-            const now=performance.now();
-            loopStarted = true;
-            /* 视频被系统暂停就继续播：iOS/安卓切后台再回来最常见的“画面在但推理不动” */
-            if(videoElement&&videoElement.paused){ try{ videoElement.play(); }catch(e){} }
-            let input=null;
-            rTicks++;
-            if(mob && videoElement && CAM_STATE==='live' && videoElement.videoWidth===0){
-                if(!zeroSince) zeroSince=now;
-                if(now-zeroSince>2200 && !tapPrompted){ tapPrompted=true; needTapPrompt(true); }
-                if(grabMode===0 && now-zeroSince>1000) tryImageCapture();
-            } else if(zeroSince && videoElement && videoElement.videoWidth>0){ zeroSince=0; needTapPrompt(false); }
-            if(gestureRecognizer && CAM_STATE==='live'){
-                if(grabMode===1){
-                    /* ImageCapture 路径：不依赖 video 解码，直接向摄像头抓帧 */
-                    let gap = Math.max(66, Math.min(220, inferMs * 2));
-                    if(!grabBusy && now-lastDetect>=gap){
-                        grabBusy=true; lastDetect=now; rDets++;
-                        imgCap.grabFrame().then(bmp=>{
-                            grabBusy=false;
-                            const c=drawBitmap(bmp);
-                            if(c) runDetect(c, performance.now());
-                        }).catch(e=>{
-                            grabBusy=false; grabErr=(e&&e.message)||String(e); window.__grabErr=grabErr;
-                        });
-                    }
-                } else if(videoElement && videoElement.readyState>=2){
-                    input = mob ? (inferInput()||videoElement) : videoElement;
-                    if(mob && now-lastHandAt>12000 && now-modeSwitchT>3000){
-                        modeSwitchT=now; lastHandAt=now;
-                        inferMode=(inferMode+1)%3;
-                        camMsg('识别不顺 · 自动切换成' + INFER_MODE_NAME[inferMode]);
-                    }
-                    if(input && inferMode!==1 && now-lastBrightT>2000){ lastBrightT=now; brightVal=frameBrightness(); }
-                    let gap = mob ? Math.max(66, Math.min(220, inferMs * 2)) : 90;
-                    if(input && now-lastDetect>=gap && now-lastTs>=1){
-                        lastDetect=now; lastTs=now; lvt=videoElement.currentTime; rDets++;
-                        runDetect(input, now);
-                    }
+            if(videoElement&&gestureRecognizer&&videoElement.readyState>=2&&videoElement.currentTime!==lvt){
+                const now=performance.now();
+                /* 手机端 55ms 一帧（约 18fps），桌面 90ms；手机推理明显跟不上时才自适应拉开间隔 */
+                let gap = mob ? 55 : 90;
+                if (mob && gFps && gFps < 10) gap = Math.min(170, Math.round(1000 / Math.max(4, gFps) + 20));
+                if(now-lastDetect>=gap){
+                    lastDetect=now;lvt=videoElement.currentTime;
+                    let res=null;
+                    try{res=gestureRecognizer.recognizeForVideo(videoElement,now);}catch(e){console.warn(e);}
+                    processGestures(res);
+                    gFpsN++; if(now-gFpsT>=1000){ gFps=Math.max(1,Math.round(gFpsN*1000/(now-gFpsT))); gFpsN=0; gFpsT=now; }
+                    refreshHint();
                 }
             }
             requestAnimationFrame(predictWebcam);
         }
-        /* 看门狗：不管识别有没有跑起来，每秒都刷新一次状态行，避免停在“就绪”两个字上瞎猜 */
-        setInterval(() => {
-            if (!window.__gestureReady) {
-                const el = document.getElementById('hand-hud');
-                if (el) {
-                    if (window.__gestureErr) { el.innerText = '手势 · 加载失败：' + String(window.__gestureErr).slice(0, 46); return; }
-                    const secs = Math.round((performance.now() - loadT0) / 1000);
-                    el.innerText = '手势 · 加载中 ' + secs + 's · ' + (loadStage || '准备中')
-                        + (loadPct > 0 ? ' · ' + Math.round(loadPct * 100) + '%' : '')
-                        + (secs > 10 ? '（首次要下 6.3MB，下完存本地，下次秒开）' : '');
-                }
-                return;
-            }
-            updateHandHud(STATE.hand.detected);
-        }, 900);
 
         window.setupEvents=()=>{
             window.addEventListener('resize',()=>{camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);composer.setSize(window.innerWidth,window.innerHeight)});
@@ -1281,7 +879,7 @@ if(manualRotateState.x!==0||manualRotateState.y!==0){const s=CONFIG.interaction.
             composer.render();
         }
         // ================= 移动端运行时 (v17.6.5-m) =================
-        const IS_MOBILE = (window.matchMedia && (window.matchMedia('(max-width: 760px)').matches || window.matchMedia('(hover: none) and (pointer: coarse)').matches)) || /Android|iPhone|iPad|iPod|HarmonyOS|Mobile/i.test(navigator.userAgent) || /[?&]m=1/.test(location.search);
+        const IS_MOBILE = (window.matchMedia && (window.matchMedia('(max-width: 760px)').matches || window.matchMedia('(hover: none) and (pointer: coarse)').matches)) || /Android|iPhone|iPad|iPod|HarmonyOS|Mobile/i.test(navigator.userAgent);
         window.IS_MOBILE = IS_MOBILE;
         if (IS_MOBILE) {
             CONFIG.particles.count = 700;
